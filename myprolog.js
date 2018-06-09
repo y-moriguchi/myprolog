@@ -6,11 +6,72 @@
  * This software is released under the MIT License.
  * http://opensource.org/licenses/mit-license.php
  **/
+var R = require("./node_modules/rena-js").clone(),
+	K = require("./node_modules/kalimotxo").K;
+R.ignore(/[ \t\n]+/);
+
 function makeProlog(ngFunction) {
 	var allRules = makeList(),
-		currentRuleId = 1;
+		currentRuleId = 1,
+		parser,
+		operator;
 	function cutFunction() {
 		return ngFunction();
+	}
+
+	function addOperator(name, command, precedence) {
+		operator["add" + command](name,
+			1200 - precedence,
+			function(/* args */) { return makeCompoundTerm(name, Array.prototype.slice.call(arguments)); });
+	}
+	parser = R.or(
+		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return { name: name, args: [] }; })
+			.t("(")
+			.t(R.delimit(function(str, index) { return operator.parse(str, index); },
+				",",
+				function(x, op, inherit) { inherit.args.push(op); return inherit; }))
+			.t(")")
+			.action(function(x) { return makeCompoundTerm(x.name, x.args); }),
+		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return makeSymbol(name); }),
+		R.t("!", function(name) { return makeSymbol("!"); }),
+		R.t(/[A-Z][a-zA-Z0-9_]*/, function(name) { return makeVariable(name); }));
+	operator = K.Operator({
+		id: function(str, index) {
+			var result = parser.parse(str, index);
+			return !result ? result : {
+				match: result.attribute,
+				index: result.lastIndex
+			};
+		},
+		actionId: function(x) { return x; },
+		follow: /\)|$/
+	});
+	addOperator(":-", "InfixNonAssoc", 1200);
+	addOperator(";", "InfixRToL", 1100);
+	addOperator(",", "InfixRToL", 1000);
+	function parseQuery(program) {
+		var query = /\?- */g,
+			match;
+		if(query.exec(program)) {
+			return operator.parse(program, query.lastIndex).attribute;
+		} else {
+			return null;
+		}
+	}
+	function execute(program) {
+		var resultQuery,
+			resultRule;
+		if(!!(resultQuery = parseQuery(program))) {
+			return executeQuery(resultQuery);
+		} else {
+			resultRule = operator.parse(program, 0).attribute;
+			if(resultRule.isCompoundTerm() && resultRule.getName() === ":-") {
+				addRule(resultRule.getTerm(0), resultRule.getTerm(1));
+			} else {
+				addRule(resultRule, null);
+			}
+			return null;
+		}
 	}
 
 	function executeQuery(query, aFrame) {
@@ -59,7 +120,7 @@ function makeProlog(ngFunction) {
 				var ruleNew,
 					unified;
 				function failFunction() {
-					return fail === cutFunction ? fail() : searchRule(applied.rest())(success, failFunction);
+					return fail === cutFunction ? fail() : searchRule(applied.rest())(success, fail);
 				}
 				ruleNew = renameRuleVariable(applied.value());
 				unified = unify(queryPattern, ruleNew.getConclusion(), queryFrame);
@@ -154,6 +215,7 @@ function makeProlog(ngFunction) {
 	}
 
 	return {
+		execute: execute,
 		executeQuery: executeQuery,
 		addRule: addRule,
 		addRuleFirst: addRuleFirst
