@@ -7,7 +7,7 @@
  * http://opensource.org/licenses/mit-license.php
  **/
 var R = require("./node_modules/rena-js").clone(),
-	K = require("./node_modules/kalimotxo").K;
+	K = require("./node_modules/kalimotxo");
 R.ignore(/[ \t\n]+/);
 
 function makeProlog(ngFunction) {
@@ -20,35 +20,43 @@ function makeProlog(ngFunction) {
 	}
 
 	function addOperator(name, command, precedence) {
-		operator["add" + command](name,
-			1200 - precedence,
-			function(/* args */) { return makeCompoundTerm(name, Array.prototype.slice.call(arguments)); });
+		function binary(x, y) {
+			return makeCompoundTerm(name, [x, y]);
+		}
+		function unary(x) {
+			return makeCompoundTerm(name, [x]);
+		}
+		operator["add" + command](name, 1200 - precedence, command.startsWith("Infix") ? binary : unary);
 	}
 	parser = R.or(
 		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return { name: name, args: [] }; })
 			.t("(")
-			.t(R.delimit(function(str, index) { return operator.parse(str, index); },
+			.t(R.delimit(function(str, index) { return operator.parse(str, index, /[,\)]/); },
 				",",
 				function(x, op, inherit) { inherit.args.push(op); return inherit; }))
 			.t(")")
 			.action(function(x) { return makeCompoundTerm(x.name, x.args); }),
 		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return makeSymbol(name); }),
 		R.t("!", function(name) { return makeSymbol("!"); }),
+		R.t(/[0-9]+/, function(num) { return makeNumber(parseInt(num)); }),
+		R.t(/[\+\-\*\/<>=:\.&_~\^\\@]+/, function(name) { return makeSymbol(name); }),
 		R.t(/[A-Z][a-zA-Z0-9_]*/, function(name) { return makeVariable(name); }));
 	operator = K.Operator({
 		id: function(str, index) {
-			var result = parser.parse(str, index);
-			return !result ? result : {
-				match: result.attribute,
-				index: result.lastIndex
-			};
+			return parser.parse(str, index);
 		},
-		actionId: function(x) { return x; },
-		follow: /\)|$/
+		actionId: function(x) { return x; }
 	});
 	addOperator(":-", "InfixNonAssoc", 1200);
+	addOperator(":-", "PrefixNonAssoc", 1200);
 	addOperator(";", "InfixRToL", 1100);
 	addOperator(",", "InfixRToL", 1000);
+	addOperator("=", "InfixNonAssoc", 700);
+	addOperator("is", "InfixNonAssoc", 700);
+	addOperator("+", "InfixLToR", 500);
+	addOperator("-", "InfixLToR", 500);
+	addOperator("*", "InfixLToR", 400);
+	addOperator("/", "InfixLToR", 400);
 	function parseQuery(program) {
 		var query = /\?- */g,
 			match;
@@ -65,8 +73,10 @@ function makeProlog(ngFunction) {
 			return executeQuery(resultQuery);
 		} else {
 			resultRule = operator.parse(program, 0).attribute;
-			if(resultRule.isCompoundTerm() && resultRule.getName() === ":-") {
+			if(resultRule.isCompoundTerm() && resultRule.arity() === 2 && resultRule.getName() === ":-") {
 				addRule(resultRule.getTerm(0), resultRule.getTerm(1));
+			} else if(resultRule.isCompoundTerm() && resultRule.arity() === 1 && resultRule.getName() === ":-") {
+				executeQuery(resultRule.getTerm(0))(function() {}, function() {});
 			} else {
 				addRule(resultRule, null);
 			}
@@ -76,21 +86,61 @@ function makeProlog(ngFunction) {
 
 	function executeQuery(query, aFrame) {
 		var frame = aFrame ? aFrame : makeEmptyFrame();
+		function simplySuccess(success, fail) {
+			return success(frame, fail);
+		}
 		if(!query) {
-			return function(success, fail) {
-				return success(frame, fail);
-			};
+			return simplySuccess;
 		} else if(query.isSymbol() && query.getValue() === "!") {
 			return function(success, fail) {
 				return success(frame, cutFunction);
 			};
-		} else if(query.isCompoundTerm() && query.getName() === ",") {
+		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === ",") {
 			return conjoin(query, frame);
-		} else if(query.isCompoundTerm() && query.getName() === ";") {
+		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === ";") {
 			return disjoin(query, frame);
+		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === "=") {
+			return function(success, fail) {
+				var frameNew = unify(query.getTerm(0), query.getTerm(1), frame);
+				return frameNew ? success(frameNew, fail) : fail();
+			}
+		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === "is") {
+			return function(success, fail) {
+				return success(compute(query.getTerm(0), query.getTerm(1), frame), fail);
+			}
+		} else if(query.isCompoundTerm() && query.arity() === 3 && query.getName() === "op") {
+			addOperatorByOp(query.getTerm(0), query.getTerm(1), query.getTerm(2));
+			return simplySuccess;
 		} else {
 			return simpleQuery(query, frame);
 		}
+	}
+	function addOperatorByOp(priority, specifier, name) {
+		var priorityNumber,
+			command;
+		if(!priority.isNumber()) {
+			throw new Error("priority must be a number");
+		} else if((priorityNumber = priority.getValue()) < 0 || priorityNumber > 1200) {
+			throw new Error("priority must be between 0 and 1200");
+		}
+		if(!specifier.isSymbol()) {
+			throw new Error("specifier must be a symbol");
+		}
+		switch(specifier.getValue()) {
+			case "xfx":  command = "InfixNonAssoc";  break;
+			case "yfx":  command = "InfixLToR";  break;
+			case "xfy":  command = "InfixRToL";  break;
+			case "fx":   command = "PrefixNonAssoc";  break;
+			case "fy":   command = "Prefix";  break;
+			case "xf":   command = "PostfixNonAssoc";  break;
+			case "yf":   command = "Postfix";  break;
+			default:
+				throw new Error("invalid specifier: " + specifier.getName());
+		}
+		if(!name.isSymbol()) {
+			throw new Error("operator must be a symbol");
+		}
+		addOperator(name.getValue(), command, priorityNumber);
 	}
 	function conjoin(query, frame) {
 		return function(success, fail) {
@@ -201,6 +251,61 @@ function makeProlog(ngFunction) {
 			return bindValue(variable, val, frame);
 		}
 	}
+	function compute(left, right, frame) {
+		var variableToBound,
+			tableBinary,
+			tableUnary;
+		tableBinary = {
+			"+": function(x, y) { return x + y; },
+			"-": function(x, y) { return x - y; },
+			"*": function(x, y) { return x * y; },
+			"/": function(x, y) { return x / y; }
+		};
+		tableUnary = {
+			"-": function(x) { return -x; }
+		};
+		function walk(term) {
+			var val1,
+				val2,
+				func;
+			if(term.isCompoundTerm()) {
+				if(term.arity() === 2) {
+					val1 = walk(term.getTerm(0));
+					val2 = walk(term.getTerm(1));
+					func = tableBinary[term.getName()];
+					if(!func) {
+						throw new Error(term.getName() + "/2 is not computable");
+					}
+					return func(val1, val2);
+				} else if(term.arity() === 1) {
+					val1 = walk(term.getTerm(0));
+					func = tableUnary(term.getName());
+					if(!func) {
+						throw new Error(term.getName() + "/1 is not computable");
+					}
+					return func(val1, val2);
+				} else {
+					throw new Error(term.getName() + "/" + term.getArity() + " is not computable");
+				}
+			} else if(term.isNumber()) {
+				return term.getValue();
+			} else if(term.isVariable()) {
+				val1 = getBoundValueRecursively(term, frame);
+				if(val1 === null) {
+					throw new Error(term.getName() + " must be bound variable");
+				} else if(!val1.isNumber()) {
+					throw new Error(term.getName() + " must be bound to a number");
+				}
+				return val1.getValue();
+			} else {
+				throw new Error(term.toString() + " is not computable");
+			}
+		}
+		if(!left.isVariable() && (variableToBound = getBoundValueRecursively(left, frame)) !== null) {
+			throw new Error("left value of `is` must be free variable");
+		}
+		return bindValue(left, walk(right), frame);
+	}
 
 	function getRules(pattern, frame) {
 		return allRules.getStream();
@@ -274,6 +379,21 @@ function getBoundValue(variable, frame) {
 	}
 	return null;
 }
+function getBoundValueRecursively(variable, frame) {
+	var value;
+	if(!variable.isVariable()) {
+		return null;
+	}
+	value = getBoundValue(variable, frame);
+	while(value !== null) {
+		if(value.isVariable()) {
+			value = getBoundValue(value, frame);
+		} else {
+			return value;
+		}
+	}
+	return null;
+}
 function bindValue(variable, value, frame) {
 	return {
 		key: function() { return variable.toString(); },
@@ -298,6 +418,7 @@ function makeCompoundTerm(name, argsList) {
 		isCompoundTerm: function() { return true; },
 		isVariable: function() { return false; },
 		isSymbol: function() { return false; },
+		isNumber: function() { return false; },
 		arity: function() { return args.length; },
 		getName: function() { return name; },
 		getTerm: function(index) { return args[index]; },
@@ -314,6 +435,7 @@ function makeVariable(variable, ruleApplicationId) {
 		isCompoundTerm: function() { return false; },
 		isVariable: function() { return true; },
 		isSymbol: function() { return false; },
+		isNumber: function() { return false; },
 		getName: function() { return variable; },
 		getId: function() { return id; },
 		toString: function() {
@@ -332,6 +454,22 @@ function makeSymbol(val) {
 		isCompoundTerm: function() { return false; },
 		isVariable: function() { return false; },
 		isSymbol: function() { return true; },
+		isNumber: function() { return false; },
+		getValue: function() { return val; },
+		toString: function() { return val; }
+	};
+	return me;
+}
+function makeNumber(val) {
+	var me;
+	if(typeof val !== "number") {
+		throw new Error(val + " must be a number");
+	}
+	me = {
+		isCompoundTerm: function() { return false; },
+		isVariable: function() { return false; },
+		isSymbol: function() { return false; },
+		isNumber: function() { return true; },
 		getValue: function() { return val; },
 		toString: function() { return val; }
 	};
