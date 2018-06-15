@@ -14,6 +14,7 @@ function makeProlog(ngFunction) {
 	var allRules = makeList(),
 		currentRuleId = 1,
 		parser,
+		parserTerm,
 		operator;
 	function cutFunction() {
 		return ngFunction();
@@ -28,22 +29,53 @@ function makeProlog(ngFunction) {
 		}
 		operator["add" + command](name, 1200 - precedence, command.startsWith("Infix") ? binary : unary);
 	}
+	function makeOperatorMatcher(follow) {
+		return function(str, index) {
+			return operator.parse(str, index, follow);
+		};
+	}
+	function arrayToPrologList(array) {
+		var i,
+			result = makeSymbol("[]");
+		for(i = array.length - 1; i >= 0; i--) {
+			result = makeCompoundTerm(".", [array[i], result]);
+		}
+		return result;
+	}
 	parser = R.or(
-		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return { name: name, args: [] }; })
-			.t("(")
-			.t(R.delimit(function(str, index) { return operator.parse(str, index, /[,\)]/); },
-				",",
-				function(x, op, inherit) { inherit.args.push(op); return inherit; }))
-			.t(")")
-			.action(function(x) { return makeCompoundTerm(x.name, x.args); }),
 		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return makeSymbol(name); }),
 		R.t("!", function(name) { return makeSymbol("!"); }),
 		R.t(/[0-9]+/, function(num) { return makeNumber(parseInt(num)); }),
 		R.t(/[\+\-\*\/<>=:\.&_~\^\\@]+/, function(name) { return makeSymbol(name); }),
-		R.t(/[A-Z][a-zA-Z0-9_]*/, function(name) { return makeVariable(name); }));
+		R.t(/[A-Z][a-zA-Z0-9_]*/, function(name) { return makeVariable(name); }),
+		R.t("[")
+			.attr([])
+			.t(makeOperatorMatcher(/[,\|\]]/), function(_, result, list) { list.push(result); return list; })
+			.t(R.or(
+				R.t("|")
+					.t(makeOperatorMatcher(/[\]]/), function(_, result, list) { list.push(result); return list; })
+					.t("]")
+					.action(function(list) { return makeCompoundTerm(".", list); }),
+				R.t("]").action(arrayToPrologList),
+				R.t(",")
+					.t(R.delimit(makeOperatorMatcher(/[,\]]/),
+						",",
+						function(x, op, list) { list.push(op); return list; }))
+					.t("]")
+					.action(arrayToPrologList))));
+	parserTerm = R.t(/[a-z][a-zA-Z0-9_]*|[\+\-\*\/<>=:\.&_~\^\\@]+/, function(name) { return { name: name, args: [] }; })
+		.t("(")
+		.t(R.delimit(makeOperatorMatcher(/[,\)]/),
+			",",
+			function(x, op, inherit) { inherit.args.push(op); return inherit; }))
+		.t(")")
+		.action(function(x) { return makeCompoundTerm(x.name, x.args); });
 	operator = K.Operator({
 		id: function(str, index) {
 			return parser.parse(str, index);
+		},
+		preId: function(str, index) {
+			return parserTerm.parse(str, index);
 		},
 		actionId: function(x) { return x; }
 	});
