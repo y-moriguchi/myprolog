@@ -34,13 +34,11 @@ function makeProlog(ngFunction) {
 			return operator.parse(str, index, follow);
 		};
 	}
-	function arrayToPrologList(array) {
-		var i,
-			result = makeSymbol("[]");
-		for(i = array.length - 1; i >= 0; i--) {
-			result = makeCompoundTerm(".", [array[i], result]);
-		}
-		return result;
+	function concatTerm(inherit, op) {
+		return {
+			name: inherit.name,
+			args: inherit.args.concat([op])
+		};
 	}
 	parser = R.or(
 		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return makeSymbol(name); }),
@@ -50,24 +48,20 @@ function makeProlog(ngFunction) {
 		R.t(/[A-Z][a-zA-Z0-9_]*/, function(name) { return makeVariable(name); }),
 		R.t("[")
 			.attr([])
-			.t(makeOperatorMatcher(/[,\|\]]/), function(_, result, list) { list.push(result); return list; })
-			.t(R.or(
-				R.t("|")
-					.t(makeOperatorMatcher(/[\]]/), function(_, result, list) { list.push(result); return list; })
+			.or(R.t("]", function() { return makeSymbol("[]"); }),
+				R.t(R.delimit(makeOperatorMatcher(/[,\|\]]/),
+					",",
+					function(x, result, list) { return list.concat([result]); }))
+				.or(R.t("|")
+					.t(makeOperatorMatcher(/[\]]/), function(_, result, list) { return list.concat([result]); })
 					.t("]")
-					.action(function(list) { return makeCompoundTerm(".", list); }),
-				R.t("]").action(arrayToPrologList),
-				R.t(",")
-					.t(R.delimit(makeOperatorMatcher(/[,\]]/),
-						",",
-						function(x, op, list) { list.push(op); return list; }))
-					.t("]")
-					.action(arrayToPrologList))));
+					.action(function(list) { return arrayToPrologList(list.slice(0, list.length - 1), list[list.length - 1]); }),
+					R.t("]").action(arrayToPrologList))));
 	parserTerm = R.t(/[a-z][a-zA-Z0-9_]*|[\+\-\*\/<>=:\.&_~\^\\@]+/, function(name) { return { name: name, args: [] }; })
 		.t("(")
 		.t(R.delimit(makeOperatorMatcher(/[,\)]/),
 			",",
-			function(x, op, inherit) { inherit.args.push(op); return inherit; }))
+			function(x, op, inherit) { return concatTerm(inherit, op); }))
 		.t(")")
 		.action(function(x) { return makeCompoundTerm(x.name, x.args); });
 	operator = K.Operator({
@@ -542,6 +536,7 @@ function isEqual(exp1, exp2) {
 }
 function termToString(term) {
 	var result,
+		array,
 		i;
 	if(typeof term !== "object") {
 		return term.toString();
@@ -555,6 +550,17 @@ function termToString(term) {
 			result += "#" + term.getId();
 		}
 		return result;
+	} else if(isPrologList(term)) {
+		array = prologListToArray(term);
+		result = "";
+		for(i = 0; i < array[0].length; i++) {
+			result += i > 0 ? ", " : "[";
+			result += termToString(array[0][i]);
+		}
+		if(!isPrologNil(array[1])) {
+			result += " | " + termToString(array[1]);
+		}
+		return result + "]";
 	} else if(term.isCompoundTerm()) {
 		result = term.getName();
 		for(i = 0; i < term.arity(); i++) {
@@ -565,6 +571,29 @@ function termToString(term) {
 	} else {
 		return term + "";
 	}
+}
+
+function arrayToPrologList(array, dot) {
+	var i,
+		result = dot ? dot : makeSymbol("[]");
+	for(i = array.length - 1; i >= 0; i--) {
+		result = makeCompoundTerm(".", [array[i], result]);
+	}
+	return result;
+}
+function isPrologList(list) {
+	return list.isCompoundTerm() && list.getName() === "." && list.arity() === 2;
+}
+function isPrologNil(list) {
+	return list.isSymbol() && list.getValue() === "[]";
+}
+function prologListToArray(list) {
+	var listPtr = list,
+		result = [];
+	for(; isPrologList(listPtr); listPtr = listPtr.getTerm(1)) {
+		result.push(listPtr.getTerm(0));
+	}
+	return [result, listPtr];
 }
 
 module.exports = {
