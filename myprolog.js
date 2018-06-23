@@ -75,6 +75,12 @@ function makeProlog() {
 	addOperator(",", "InfixRToL", 1000);
 	addOperator("=", "InfixNonAssoc", 700);
 	addOperator("is", "InfixNonAssoc", 700);
+	addOperator("<", "InfixNonAssoc", 700);
+	addOperator(">", "InfixNonAssoc", 700);
+	addOperator("<=", "InfixNonAssoc", 700);
+	addOperator(">=", "InfixNonAssoc", 700);
+	addOperator("=:=", "InfixNonAssoc", 700);
+	addOperator("=\\=", "InfixNonAssoc", 700);
 	addOperator("+", "InfixLToR", 500);
 	addOperator("-", "InfixLToR", 500);
 	addOperator("*", "InfixLToR", 400);
@@ -107,7 +113,31 @@ function makeProlog() {
 	}
 
 	function executeQuery(query, cutFailFunction, aFrame) {
-		var frame = aFrame ? aFrame : makeEmptyFrame();
+		var frame = aFrame ? aFrame : makeEmptyFrame(),
+			relationalOps,
+			relationalFunc;
+		relationalOps = {
+			"<": makeRelationalFunc(function(x, y) { return x < y; }),
+			">": makeRelationalFunc(function(x, y) { return x > y; }),
+			"<=": makeRelationalFunc(function(x, y) { return x <= y; }),
+			">=": makeRelationalFunc(function(x, y) { return x >= y; }),
+			"=:=": makeRelationalFunc(function(x, y) { return x === y; }),
+			"=\\=": makeRelationalFunc(function(x, y) { return x !== y; })
+		};
+		function makeRelationalFunc(func) {
+			function getValue(term) {
+				var value = term.isVariable() ? getBoundValueRecursively(term, frame) : term;
+				if(!value.isNumber()) {
+					throw new Error(term + " must be bound to a number");
+				}
+				return value.getValue();
+			}
+			return function(term1, term2) {
+				var val1 = getValue(term1),
+					val2 = getValue(term2);
+				return func(val1, val2);
+			}
+		}
 		function simplySuccess(success, fail) {
 			return success(frame, fail);
 		}
@@ -173,6 +203,10 @@ function makeProlog() {
 		} else if(query.isCompoundTerm() && query.arity() === 3 && query.getName() === "op") {
 			addOperatorByOp(query.getTerm(0), query.getTerm(1), query.getTerm(2));
 			return simplySuccess;
+		} else if(query.isCompoundTerm() && query.arity() === 2 && !!(relationalFunc = relationalOps[query.getName()])) {
+			return function(success, fail) {
+				return relationalFunc(query.getTerm(0), query.getTerm(1)) ? success(frame, fail) : fail();
+			}
 		} else {
 			return simpleQuery(query, frame);
 		}
