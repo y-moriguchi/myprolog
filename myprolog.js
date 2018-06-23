@@ -11,6 +11,10 @@ var R = require("rena-js").clone(),
 	anonymousVariableId = 1;
 R.ignore(/[ \t\n]+/);
 
+function isInteger(value) {
+	return typeof value === "number" && isFinite(value) && Math.floor(value) === value;
+}
+
 function makeProlog() {
 	var allRules = makeList(),
 		currentRuleId = 1,
@@ -197,18 +201,41 @@ function makeProlog() {
 			return function(success, fail) {
 				var frameNew = unify(query.getTerm(0), query.getTerm(1), frame);
 				return frameNew ? success(frameNew, fail) : fail();
-			}
+			};
 		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === "is") {
 			return function(success, fail) {
 				return success(compute(query.getTerm(0), query.getTerm(1), frame), fail);
-			}
+			};
 		} else if(query.isCompoundTerm() && query.arity() === 3 && query.getName() === "op") {
 			addOperatorByOp(query.getTerm(0), query.getTerm(1), query.getTerm(2));
 			return simplySuccess;
 		} else if(query.isCompoundTerm() && query.arity() === 2 && !!(relationalFunc = relationalOps[query.getName()])) {
 			return function(success, fail) {
 				return relationalFunc(query.getTerm(0), query.getTerm(1)) ? success(frame, fail) : fail();
-			}
+			};
+		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "var") {
+			return function(success, fail) {
+				return isFreeVariable(query.getTerm(0), frame) ? success(frame, fail) : fail();
+			};
+		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "nonvar") {
+			return function(success, fail) {
+				return !isFreeVariable(query.getTerm(0), frame) ? success(frame, fail) : fail();
+			};
+		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "atom") {
+			return function(success, fail) {
+				var value = getBoundValueRecursively(query.getTerm(0), frame);
+				return value != null && value.isSymbol() ? success(frame, fail) : fail();
+			};
+		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "integer") {
+			return function(success, fail) {
+				var value = getBoundValueRecursively(query.getTerm(0), frame);
+				return value != null && value.isNumber() && isInteger(value.getValue()) ? success(frame, fail) : fail();
+			};
+		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "atomic") {
+			return function(success, fail) {
+				var value = getBoundValueRecursively(query.getTerm(0), frame);
+				return value != null && (value.isNumber() || value.isSymbol()) ? success(frame, fail) : fail();
+			};
 		} else {
 			return simpleQuery(query, frame);
 		}
@@ -439,6 +466,15 @@ function getBoundValue(variable, frame) {
 		}
 	}
 	return null;
+}
+function isFreeVariable(variable, frame) {
+	var value = variable;
+	while(value.isVariable()) {
+		if((value = getBoundValue(value, frame)) === null) {
+			return true;
+		}
+	}
+	return false;
 }
 function getBoundValueRecursively(variable, frame) {
 	var value,
