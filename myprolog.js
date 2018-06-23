@@ -6,20 +6,16 @@
  * This software is released under the MIT License.
  * http://opensource.org/licenses/mit-license.php
  **/
-var R = require("./node_modules/rena-js").clone(),
-	K = require("./node_modules/kalimotxo");
+var R = require("rena-js").clone(),
+	K = require("kalimotxo");
 R.ignore(/[ \t\n]+/);
 
-function makeProlog(ngFunction) {
+function makeProlog() {
 	var allRules = makeList(),
 		currentRuleId = 1,
 		parser,
 		parserTerm,
 		operator;
-	function cutFunction() {
-		return ngFunction();
-	}
-
 	function addOperator(name, command, precedence) {
 		function binary(x, y) {
 			return makeCompoundTerm(name, [x, y]);
@@ -92,17 +88,17 @@ function makeProlog(ngFunction) {
 			return null;
 		}
 	}
-	function execute(program) {
+	function execute(program, fail) {
 		var resultQuery,
 			resultRule;
 		if(!!(resultQuery = parseQuery(program))) {
-			return executeQuery(resultQuery);
+			return executeQuery(resultQuery, fail);
 		} else {
 			resultRule = operator.parse(program, 0).attribute;
 			if(resultRule.isCompoundTerm() && resultRule.arity() === 2 && resultRule.getName() === ":-") {
 				addRule(resultRule.getTerm(0), resultRule.getTerm(1));
 			} else if(resultRule.isCompoundTerm() && resultRule.arity() === 1 && resultRule.getName() === ":-") {
-				executeQuery(resultRule.getTerm(0))(function() {}, function() {});
+				executeQuery(resultRule.getTerm(0), function() {})(function() {}, function() {});
 			} else {
 				addRule(resultRule, null);
 			}
@@ -110,10 +106,50 @@ function makeProlog(ngFunction) {
 		}
 	}
 
-	function executeQuery(query, aFrame) {
+	function executeQuery(query, cutFailFunction, aFrame) {
 		var frame = aFrame ? aFrame : makeEmptyFrame();
 		function simplySuccess(success, fail) {
 			return success(frame, fail);
+		}
+		function cutFunction() {
+			return cutFailFunction();
+		}
+		function conjoin(query, frame) {
+			return function(success, fail) {
+				function successFunction(frame, fail) {
+					return executeQuery(query.getTerm(1), cutFailFunction, frame)(success, fail);
+				}
+				return executeQuery(query.getTerm(0), cutFailFunction, frame)(successFunction, fail);
+			};
+		}
+		function disjoin(query, frame) {
+			return function(success, fail) {
+				function failFunction() {
+					return fail === cutFunction ? fail() : executeQuery(query.getTerm(1), cutFailFunction, frame);
+				}
+				return executeQuery(query.getTerm(0), cutFailFunction, frame)(success, failFunction);
+			};
+		}
+		function simpleQuery(queryPattern, queryFrame) {
+			var applied = getRules(queryPattern, queryFrame);
+			function searchRule(applied) {
+				if(applied.isNull()) {
+					return function(success, fail) {
+						return fail();
+					}
+				}
+				return function(success, fail) {
+					var ruleNew,
+						unified;
+					function failFunction() {
+						return fail === cutFunction ? fail() : searchRule(applied.rest())(success, fail);
+					}
+					ruleNew = renameRuleVariable(applied.value());
+					unified = unify(queryPattern, ruleNew.getConclusion(), queryFrame);
+					return unified ? executeQuery(ruleNew.getBody(), cutFailFunction, unified)(success, failFunction) : failFunction();
+				};
+			}
+			return searchRule(applied);
 		}
 		if(!query) {
 			return simplySuccess;
@@ -167,43 +203,6 @@ function makeProlog(ngFunction) {
 			throw new Error("operator must be a symbol");
 		}
 		addOperator(name.getValue(), command, priorityNumber);
-	}
-	function conjoin(query, frame) {
-		return function(success, fail) {
-			function successFunction(frame, fail) {
-				return executeQuery(query.getTerm(1), frame)(success, fail);
-			}
-			return executeQuery(query.getTerm(0), frame)(successFunction, fail);
-		};
-	}
-	function disjoin(query, frame) {
-		return function(success, fail) {
-			function failFunction() {
-				return fail === cutFunction ? fail() : executeQuery(query.getTerm(1), frame);
-			}
-			return executeQuery(query.getTerm(0), frame)(success, failFunction);
-		};
-	}
-	function simpleQuery(queryPattern, queryFrame) {
-		var applied = getRules(queryPattern, queryFrame);
-		function searchRule(applied) {
-			if(applied.isNull()) {
-				return function(success, fail) {
-					return fail();
-				}
-			}
-			return function(success, fail) {
-				var ruleNew,
-					unified;
-				function failFunction() {
-					return fail === cutFunction ? fail() : searchRule(applied.rest())(success, fail);
-				}
-				ruleNew = renameRuleVariable(applied.value());
-				unified = unify(queryPattern, ruleNew.getConclusion(), queryFrame);
-				return unified ? executeQuery(ruleNew.getBody(), unified)(success, failFunction) : failFunction();
-			};
-		}
-		return searchRule(applied);
 	}
 	function renameRuleVariable(rule) {
 		var ruleId = currentRuleId++;
@@ -267,7 +266,7 @@ function makeProlog(ngFunction) {
 			}
 		}
 		if(binding) {
-			return unify(bindingVal, val, frame);
+			return unify(binding, val, frame);
 		} else if(val.isVariable()) {
 			binding = getBoundValue(val, frame);
 			return binding ? unify(variable, binding, frame) : bindValue(variable, val, frame);
@@ -330,7 +329,7 @@ function makeProlog(ngFunction) {
 		if(!left.isVariable() && (variableToBound = getBoundValueRecursively(left, frame)) !== null) {
 			throw new Error("left value of `is` must be free variable");
 		}
-		return bindValue(left, walk(right), frame);
+		return bindValue(left, makeNumber(walk(right)), frame);
 	}
 
 	function getRules(pattern, frame) {
@@ -406,15 +405,35 @@ function getBoundValue(variable, frame) {
 	return null;
 }
 function getBoundValueRecursively(variable, frame) {
-	var value;
+	var value,
+		valueNew;
+	function walk(term) {
+		var compounds,
+			compound,
+			i;
+		if(term.isCompoundTerm()) {
+			compounds = [];
+			for(i = 0; i < term.arity(); i++) {
+				compound = walk(term.getTerm(i));
+				if(!compound) {
+					return null;
+				}
+				compounds.push(compound);
+			}
+			return makeCompoundTerm(term.getName(), compounds);
+		} else if(term.isVariable()) {
+			return getBoundValue(term, frame);
+		} else {
+			return term;
+		}
+	}
 	if(!variable.isVariable()) {
 		return null;
 	}
 	value = getBoundValue(variable, frame);
-	while(value !== null) {
-		if(value.isVariable()) {
-			value = getBoundValue(value, frame);
-		} else {
+	for(; value !== null; value = valueNew) {
+		valueNew = walk(value);
+		if(isEqual(value, valueNew)) {
 			return value;
 		}
 	}
@@ -423,6 +442,7 @@ function getBoundValueRecursively(variable, frame) {
 function bindValue(variable, value, frame) {
 	return {
 		key: function() { return variable.toString(); },
+		keyVariable: function() { return variable; },
 		value: function() { return value; },
 		rest: function() { return frame; },
 		isNull: function() { return false; }
@@ -523,6 +543,8 @@ function isEqual(exp1, exp2) {
 		return exp1.getValue() === exp2.getValue();
 	} else if(exp1.isVariable() && exp2.isVariable()) {
 		return exp1.getName() === exp2.getName() && exp1.getId() === exp2.getId();
+	} else if(exp1.isNumber() && exp2.isNumber()) {
+		return exp1.getValue() === exp2.getValue();
 	} else if(exp1.isCompoundTerm() && exp2.isCompoundTerm() && exp1.getName() === exp2.getName() && exp1.arity() === exp2.arity()) {
 		for(i = 0; i < exp1.arity(); i++) {
 			if(!isEqual(exp1.getTerm(i), exp2.getTerm(i))) {
@@ -550,6 +572,8 @@ function termToString(term) {
 			result += "#" + term.getId();
 		}
 		return result;
+	} else if(term.isNumber()) {
+		return term.getValue().toString();
 	} else if(isPrologList(term)) {
 		array = prologListToArray(term);
 		result = "";
@@ -596,11 +620,33 @@ function prologListToArray(list) {
 	return [result, listPtr];
 }
 
+function getAllBoundVariablesMap(frame, func) {
+	var nowFrame = frame,
+		result = {},
+		variable;
+	for(; !nowFrame.isNull(); nowFrame = nowFrame.rest()) {
+		variable = nowFrame.keyVariable();
+		if(!variable.getId()) {
+			result[variable.getName()] = func(getBoundValueRecursively(variable, frame));
+		}
+	}
+	return result;
+}
+function getAllBoundVariables(frame) {
+	return getAllBoundVariablesMap(frame, function(x) { return x; });
+}
+function getAllBoundVariablesToString(frame) {
+	return getAllBoundVariablesMap(frame, function(x) { return x.toString(); });
+}
+
 module.exports = {
 	makeProlog,
 	makeRule,
 	makeCompoundTerm,
 	makeVariable,
 	makeSymbol,
-	frameToObject
+	frameToObject,
+	getAllBoundVariablesMap,
+	getAllBoundVariables,
+	getAllBoundVariablesToString
 };
