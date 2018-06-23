@@ -7,7 +7,8 @@
  * http://opensource.org/licenses/mit-license.php
  **/
 var R = require("rena-js").clone(),
-	K = require("kalimotxo");
+	K = require("kalimotxo"),
+	anonymousVariableId = 1;
 R.ignore(/[ \t\n]+/);
 
 function makeProlog() {
@@ -40,8 +41,9 @@ function makeProlog() {
 		R.t(/[a-z][a-zA-Z0-9_]*/, function(name) { return makeSymbol(name); }),
 		R.t("!", function(name) { return makeSymbol("!"); }),
 		R.t(/[0-9]+/, function(num) { return makeNumber(parseInt(num)); }),
+		R.t(/[A-Z_][a-zA-Z0-9_]*/, function(name) { return name === "_" ? makeAnonymousVariable() : makeVariable(name); }),
 		R.t(/[\+\-\*\/<>=:\.&_~\^\\@]+/, function(name) { return makeSymbol(name); }),
-		R.t(/[A-Z][a-zA-Z0-9_]*/, function(name) { return makeVariable(name); }),
+		R.t(/\'[^\']+\'/, function(name) { return makeSymbol(name.substring(1, name.length - 1)); }),
 		R.t("[")
 			.attr([])
 			.or(R.t("]", function() { return makeSymbol("[]"); }),
@@ -246,7 +248,7 @@ function makeProlog() {
 			if(!term) {
 				return term;
 			} else if(term.isVariable()) {
-				return makeVariable(term.getName(), ruleId);
+				return term.isAnonymous() ? makeAnonymousVariable() : makeVariable(term.getName(), ruleId);
 			} else if(term.isCompoundTerm()) {
 				elements = [];
 				for(i = 0; i < term.arity(); i++) {
@@ -518,11 +520,30 @@ function makeVariable(variable, ruleApplicationId) {
 		isNumber: function() { return false; },
 		getName: function() { return variable; },
 		getId: function() { return id; },
+		isAnonymous: function() { return false; },
 		toString: function() {
 			var result = "?" + variable;
 			if(id) {
 				result += "#" + id;
 			}
+			return result;
+		}
+	};
+	return me;
+}
+function makeAnonymousVariable() {
+	var variableId = anonymousVariableId++,
+		me;
+	me = {
+		isCompoundTerm: function() { return false; },
+		isVariable: function() { return true; },
+		isSymbol: function() { return false; },
+		isNumber: function() { return false; },
+		getName: function() { return "#" + variableId; },
+		getId: function() { return -1; },
+		isAnonymous: function() { return true; },
+		toString: function() {
+			var result = "?##" + variableId;
 			return result;
 		}
 	};
