@@ -100,17 +100,17 @@ function makeProlog() {
 			return null;
 		}
 	}
-	function execute(program, fail) {
+	function execute(program, success, fail) {
 		var resultQuery,
 			resultRule;
 		if(!!(resultQuery = parseQuery(program))) {
-			return executeQuery(resultQuery, fail);
+			return executeQuery(resultQuery, success, fail);
 		} else {
 			resultRule = operator.parse(program, 0).attribute;
 			if(resultRule.isCompoundTerm() && resultRule.arity() === 2 && resultRule.getName() === ":-") {
 				addRule(resultRule.getTerm(0), resultRule.getTerm(1));
 			} else if(resultRule.isCompoundTerm() && resultRule.arity() === 1 && resultRule.getName() === ":-") {
-				executeQuery(resultRule.getTerm(0), function() {})(function() {}, function() {});
+				executeQuery(resultRule.getTerm(0), function() {}, function() {});
 			} else {
 				addRule(resultRule, null);
 			}
@@ -118,10 +118,19 @@ function makeProlog() {
 		}
 	}
 
-	function executeQuery(query, cutFailFunction, aFrame) {
-		var frame = aFrame ? aFrame : makeEmptyFrame(),
+	function executeQuery(aQuery, successFunction, cutFailFunction, aFrame, continuation) {
+		var frameStack = continuation ? continuation.frameStack.concat([]) : [null],
+			ruleStack = continuation ? continuation.ruleStack.concat([]) : [],
+			queryStack = continuation ? continuation.queryStack.concat([]) : [],
+			successStack = continuation ? continuation.successStack.concat([]) : [],
+			frame = aFrame ? aFrame : makeEmptyFrame(),
 			relationalOps,
-			relationalFunc;
+			relationalFunc,
+			query = aQuery,
+			returnFail,
+			isnext,
+			CUTMARKER = {},
+			CONTINUE_MARKER = {};
 		relationalOps = {
 			"<": makeRelationalFunc(function(x, y) { return x < y; }),
 			">": makeRelationalFunc(function(x, y) { return x > y; }),
@@ -144,19 +153,99 @@ function makeProlog() {
 				return func(val1, val2);
 			}
 		}
-		function simplySuccess(success, fail) {
-			return success(frame, fail);
+		function toArray(term, pred) {
+			var result = [],
+				nowTerm = term;
+			for(; pred(nowTerm); nowTerm = nowTerm.getTerm(1)) {
+				result.push(nowTerm.getTerm(0));
+			}
+			result.push(nowTerm);
+			return result;
+		}
+		function getnext(cont) {
+			return function() {
+				var nowFrame,
+					nowRule;
+				while(true) {
+					nowFrame = cont.frameStack[cont.frameStack.length - 1];
+					if(nowFrame === CUTMARKER || nowFrame === null) {
+						return cutFailFunction();
+					}
+					nowRule = cont.ruleStack[cont.ruleStack.length - 1];
+					ruleNew = renameRuleVariable(nowRule);
+					unified = unify(cont.queryStack[cont.queryStack.length - 1], ruleNew.getConclusion(), nowFrame);
+					if(unified) {
+						return executeQuery(ruleNew.getBody(), successFunction, cutFailFunction, unified, cont);
+					} else if(!!(failFunction = fail())) {
+						return failFunction();
+					}
+				}
+			};
+		}
+		function success() {
+			var cont,
+				ruleNew,
+				unified;
+			if(successStack.length > 0) {
+				query = successStack.pop();
+				return CONTINUE_MARKER;
+			} else {
+				cont = {
+					frameStack: frameStack.slice(0, frameStack.length - 1),
+					ruleStack: ruleStack.slice(0, ruleStack.length - 1),
+					queryStack: queryStack.slice(0, queryStack.length - 1),
+					successStack: successStack.concat([])
+				};
+				return successFunction(frame, getnext(cont));
+			}
+		}
+		function simplySuccess() {
+			var cont;
+			if(successStack.length > 0) {
+				query = successStack.pop();
+				return CONTINUE_MARKER;
+			} else {
+				cont = {
+					frameStack: frameStack.concat([]),
+					ruleStack: ruleStack.concat([]),
+					queryStack: queryStack.concat([]),
+					successStack: successStack.concat([])
+				};
+				return successFunction(frame, getnext(cont));
+			}
+		}
+		function fail() {
+			var stackval;
+			frame = frameStack.pop();
+			ruleStack.pop();
+			query = queryStack.pop();
+			stackval = frameStack[frameStack.length - 1];
+			if(stackval === null || stackval === CUTMARKER) {
+				return cutFailFunction;
+			} else {
+				return null;
+			}
+		}
+		function pushStack(frame, query, rule) {
+			var stackval = frameStack[frameStack.length - 1];
+			if(stackval !== CUTMARKER) {
+				frameStack.push(frame);
+				queryStack.push(query);
+				ruleStack.push(rule);
+			}
 		}
 		function cutFunction() {
 			return cutFailFunction();
 		}
-		function conjoin(query, frame) {
-			return function(success, fail) {
-				function successFunction(frame, fail) {
-					return executeQuery(query.getTerm(1), cutFailFunction, frame)(success, fail);
-				}
-				return executeQuery(query.getTerm(0), cutFailFunction, frame)(successFunction, fail);
-			};
+		function conjoin(query) {
+			var flatten = toArray(query, isConjoin),
+				i;
+			function isConjoin(query) {
+				return query.isCompoundTerm() && query.arity() === 2 && query.getName() === ",";
+			}
+			for(i = flatten.length - 1; i >= 0; i--) {
+				successStack.push(flatten[i]);
+			}
 		}
 		function disjoin(query, frame) {
 			return function(success, fail) {
@@ -166,78 +255,74 @@ function makeProlog() {
 				return executeQuery(query.getTerm(0), cutFailFunction, frame)(success, failFunction);
 			};
 		}
-		function simpleQuery(queryPattern, queryFrame) {
-			var applied = getRules(queryPattern, queryFrame);
-			function searchRule(applied) {
-				if(applied.isNull()) {
-					return function(success, fail) {
-						return fail();
+		function simpleQuery() {
+			var applied = getRules(query, frame),
+				nowApplied = applied,
+				reverseBuf = [],
+				ruleNew,
+				unified,
+				failFunction,
+				i;
+			if(nowApplied.isNull()) {
+				if(!!(failFunction = fail())) {
+					return failFunction;
+				}
+			} else {
+				for(; !nowApplied.isNull(); nowApplied = nowApplied.rest()) {
+					reverseBuf.push(nowApplied.value());
+				}
+				for(i = reverseBuf.length - 1; i >= 0; i--) {
+					pushStack(frame, query, reverseBuf[i]);
+				}
+				while(true) {
+					ruleNew = renameRuleVariable(ruleStack[ruleStack.length - 1]);
+					unified = unify(query, ruleNew.getConclusion(), frame);
+					if(unified) {
+						query = ruleNew.getBody();
+						frame = unified;
+						break;
+					} else if(!!(failFunction = fail())) {
+						return failFunction;
 					}
 				}
-				return function(success, fail) {
-					var ruleNew,
-						unified;
-					function failFunction() {
-						return fail === cutFunction ? fail() : searchRule(applied.rest())(success, fail);
-					}
-					ruleNew = renameRuleVariable(applied.value());
-					unified = unify(queryPattern, ruleNew.getConclusion(), queryFrame);
-					return unified ? executeQuery(ruleNew.getBody(), cutFailFunction, unified)(success, failFunction) : failFunction();
-				};
 			}
-			return searchRule(applied);
 		}
-		if(!query) {
-			return simplySuccess;
-		} else if(query.isSymbol() && query.getValue() === "!") {
-			return function(success, fail) {
-				return success(frame, cutFunction);
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === ",") {
-			return conjoin(query, frame);
-		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === ";") {
-			return disjoin(query, frame);
-		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === "=") {
-			return function(success, fail) {
-				var frameNew = unify(query.getTerm(0), query.getTerm(1), frame);
-				return frameNew ? success(frameNew, fail) : fail();
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === "is") {
-			return function(success, fail) {
-				return success(compute(query.getTerm(0), query.getTerm(1), frame), fail);
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 3 && query.getName() === "op") {
-			addOperatorByOp(query.getTerm(0), query.getTerm(1), query.getTerm(2));
-			return simplySuccess;
-		} else if(query.isCompoundTerm() && query.arity() === 2 && !!(relationalFunc = relationalOps[query.getName()])) {
-			return function(success, fail) {
-				return relationalFunc(query.getTerm(0), query.getTerm(1)) ? success(frame, fail) : fail();
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "var") {
-			return function(success, fail) {
-				return isFreeVariable(query.getTerm(0), frame) ? success(frame, fail) : fail();
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "nonvar") {
-			return function(success, fail) {
-				return !isFreeVariable(query.getTerm(0), frame) ? success(frame, fail) : fail();
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "atom") {
-			return function(success, fail) {
-				var value = getBoundValueRecursively(query.getTerm(0), frame);
-				return value != null && value.isSymbol() ? success(frame, fail) : fail();
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "integer") {
-			return function(success, fail) {
-				var value = getBoundValueRecursively(query.getTerm(0), frame);
-				return value != null && value.isNumber() && isInteger(value.getValue()) ? success(frame, fail) : fail();
-			};
-		} else if(query.isCompoundTerm() && query.arity() === 1 && query.getName() === "atomic") {
-			return function(success, fail) {
-				var value = getBoundValueRecursively(query.getTerm(0), frame);
-				return value != null && (value.isNumber() || value.isSymbol()) ? success(frame, fail) : fail();
-			};
-		} else {
-			return simpleQuery(query, frame);
+		while(true) {
+			if(!query) {
+				isnext = success();
+			} else if(query.isSymbol() && query.getValue() === "!") {
+				pushStack(CUTMARKER, null, null);
+				isnext = simplySuccess();
+			} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === ",") {
+				conjoin(query);
+				isnext = simplySuccess();
+			} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === ";") {
+				return disjoin(query, frame);
+			} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === "=") {
+				frame = unify(query.getTerm(0), query.getTerm(1), frame);
+				isnext = simplySuccess();
+			} else if(query.isCompoundTerm() && query.arity() === 2 && query.getName() === "is") {
+				frame = compute(query.getTerm(0), query.getTerm(1), frame);
+				isnext = simplySuccess();
+			} else if(query.isCompoundTerm() && query.arity() === 3 && query.getName() === "op") {
+				addOperatorByOp(query.getTerm(0), query.getTerm(1), query.getTerm(2));
+				isnext = simplySuccess();
+			} else if(query.isCompoundTerm() && query.arity() === 2 && !!(relationalFunc = relationalOps[query.getName()])) {
+				if(relationalFunc(query.getTerm(0), query.getTerm(1))) {
+					isnext = simplySuccess();
+				} else if(!!(returnFail = simpleQuery(query, frame))) {
+					return returnFail();
+				}
+			} else {
+				if(!!(returnFail = simpleQuery(query, frame))) {
+					return returnFail();
+				} else {
+					isnext = CONTINUE_MARKER;
+				}
+			}
+			if(isnext !== CONTINUE_MARKER) {
+				return isnext;
+			}
 		}
 	}
 	function addOperatorByOp(priority, specifier, name) {
@@ -528,6 +613,14 @@ function frameToObject(frame) {
 	}
 	return result;
 }
+function frameToObjectString(frame) {
+	var nowFrame = frame,
+		result = {};
+	for(; !nowFrame.isNull(); nowFrame = nowFrame.rest()) {
+		result[nowFrame.key()] = nowFrame.value() ? nowFrame.value().toString() : null;
+	}
+	return result;
+}
 
 function makeCompoundTerm(name, argsList) {
 	var args = [].concat(argsList),
@@ -727,7 +820,7 @@ function getAllBoundVariables(frame) {
 	return getAllBoundVariablesMap(frame, function(x) { return x; });
 }
 function getAllBoundVariablesToString(frame) {
-	return getAllBoundVariablesMap(frame, function(x) { return x.toString(); });
+	return getAllBoundVariablesMap(frame, function(x) { return x ? x.toString() : x; });
 }
 
 module.exports = {
