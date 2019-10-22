@@ -32,13 +32,17 @@ function createSuccess(keyIn) {
                 variableArray.push(i + " = " + boundVariables[i]);
             }
         }
-        for(i = 0; i < variableArray.length; i++) {
-            comma = i < variableArray.length - 1 ? ",\n" : "";
-            process.stdout.write(variableArray[i] + comma);
-        }
-        action = keyIn();
-        if(action === ";") {
-            fail();
+        if(variableArray.length > 0) {
+            for(i = 0; i < variableArray.length; i++) {
+                comma = i < variableArray.length - 1 ? ",\n" : "";
+                process.stdout.write(variableArray[i] + comma);
+            }
+            action = keyIn();
+            if(action === ";") {
+                fail();
+            }
+        } else {
+            console.log("yes");
         }
     };
 }
